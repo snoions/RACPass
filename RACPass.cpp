@@ -257,6 +257,9 @@ void RACPass::initializeCallbacks(Module &M) {
 	OrdTy = Type::getInt32Ty(Ctx);
 
 	VoidTy = Type::getVoidTy(Ctx);
+    //only deal with default address space
+	Type *Ptr8Ty = PointerType::get(Type::getIntNTy(Ctx, 8), 0);
+
 	// Get the function to call from our untime library.
 	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
 		const unsigned ByteSize = 1U << i;
@@ -266,7 +269,7 @@ void RACPass::initializeCallbacks(Module &M) {
 		std::string BitSizeStr = utostr(BitSize);
 
 		Type *Ty = Type::getIntNTy(Ctx, BitSize);
-		Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+		Type *PtrTy = PointerType::get(Ty, 0);
 
 		SmallString<32> LoadName("rac_load" + BitSizeStr);
 		SmallString<32> StoreName("rac_store" + BitSizeStr);
@@ -279,9 +282,9 @@ void RACPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicStoreName("rac_atomic_store" + BitSizeStr);
 #endif
 		RACLoad[i]  = checkRACPassInterfaceFunction(
-							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy, IntPtrTy).getCallee());
+							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy, Ptr8Ty).getCallee());
 		RACStore[i] = checkRACPassInterfaceFunction(
-							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty, IntPtrTy).getCallee());
+							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty, Ptr8Ty).getCallee());
 		
 #ifdef ENABLEATOMIC		
 		RACVolatileLoad[i]  = checkRACPassInterfaceFunction(
@@ -343,15 +346,15 @@ void RACPass::initializeCallbacks(Module &M) {
 			M.getOrInsertFunction("rac_atomic_thread_fence", Attr, VoidTy, OrdTy, IntPtrTy).getCallee());
 #endif
 	
-	MemmoveFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memmove", Attr, IntPtrTy, IntPtrTy,
-					IntPtrTy, IntPtrTy).getCallee());
-	MemcpyFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memcpy", Attr, IntPtrTy, IntPtrTy,
-					IntPtrTy, IntPtrTy).getCallee());
-	MemsetFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memset", Attr, IntPtrTy, IntPtrTy,
-					Int32Ty, IntPtrTy).getCallee());
+	//MemmoveFn = checkRACPassInterfaceFunction(
+	//				M.getOrInsertFunction("rac_memmove", Attr, IntPtrTy, IntPtrTy,
+	//				IntPtrTy, IntPtrTy).getCallee());
+	//MemcpyFn = checkRACPassInterfaceFunction(
+	//				M.getOrInsertFunction("rac_memcpy", Attr, IntPtrTy, IntPtrTy,
+	//				IntPtrTy, IntPtrTy).getCallee());
+	//MemsetFn = checkRACPassInterfaceFunction(
+	//				M.getOrInsertFunction("rac_memset", Attr, IntPtrTy, IntPtrTy,
+	//				Int32Ty, IntPtrTy).getCallee());
 }
 
 bool RACPass::doInitialization(Module &M) {
@@ -684,7 +687,7 @@ bool RACPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	const unsigned byteSize = 1U << idx;
         const unsigned bitSize = byteSize * 8;
         Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
-		Type *ptrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+		Type *ptrTy = PointerType::get(Ty, 0);
 
 	if (IsWrite) {
 		errs() << "Instrumenting non-atomic store: " << *I << "\n";
@@ -697,6 +700,8 @@ bool RACPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 	} else {
 		errs() << "Instrumenting non-atomic load: " << *I << "\n";
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
+        errs() << "arg1 type " << *ptrTy << " arg2 type " << *position->getType() << "\n";
+        errs() << "func type " << *OnAccessFunc->getFunctionType() << "\n";
                 Type *orgTy = val->getType();
                 Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
                 Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
@@ -727,7 +732,7 @@ bool RACPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 	const unsigned byteSize = 1U << idx;
 	const unsigned bitSize = byteSize * 8;
     Type *Ty = Type::getIntNTy(IRB.getContext(), bitSize);
-	Type *ptrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	Type *ptrTy = PointerType::get(Ty, 0);
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		assert( LI->isVolatile() );
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
@@ -833,7 +838,7 @@ bool RACPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, 0);
 
 		Value *CmpOperand = IRB.CreateBitOrPointerCast(CASI->getCompareOperand(), Ty);
 		Value *NewOperand = IRB.CreateBitOrPointerCast(CASI->getNewValOperand(), Ty);
@@ -924,6 +929,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 	// the pointer to the address is always the first argument
 	Value *OrigPtr = parameters[0];
+    int AddressSpace = 0;
 
 	// atomic_init; args = {obj, order}
 	if (funName.contains("atomic_init")) {
@@ -935,7 +941,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val;
@@ -962,7 +968,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *order;
 		if (isExplicit)
@@ -985,7 +991,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 		// does this version of call always have an atomic order as an argument?
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
@@ -1015,7 +1021,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val = IRB.CreatePointerCast(OrigVal, Ty);
@@ -1042,7 +1048,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val;
@@ -1077,7 +1083,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		int op;
 		if ( funName.contains("_fetch_add") )
@@ -1146,7 +1152,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val;
@@ -1177,7 +1183,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);
@@ -1225,7 +1231,7 @@ bool RACPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
 		Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
-	    Type *PtrTy = PointerType::get(Ty, IntPtrTy->getPointerAddressSpace());
+	    Type *PtrTy = PointerType::get(Ty, AddressSpace);
 
 		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);

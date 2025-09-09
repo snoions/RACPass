@@ -346,15 +346,15 @@ void RACPass::initializeCallbacks(Module &M) {
 			M.getOrInsertFunction("rac_atomic_thread_fence", Attr, VoidTy, OrdTy, IntPtrTy).getCallee());
 #endif
 	
-	//MemmoveFn = checkRACPassInterfaceFunction(
-	//				M.getOrInsertFunction("rac_memmove", Attr, IntPtrTy, IntPtrTy,
-	//				IntPtrTy, IntPtrTy).getCallee());
-	//MemcpyFn = checkRACPassInterfaceFunction(
-	//				M.getOrInsertFunction("rac_memcpy", Attr, IntPtrTy, IntPtrTy,
-	//				IntPtrTy, IntPtrTy).getCallee());
-	//MemsetFn = checkRACPassInterfaceFunction(
-	//				M.getOrInsertFunction("rac_memset", Attr, IntPtrTy, IntPtrTy,
-	//				Int32Ty, IntPtrTy).getCallee());
+	MemmoveFn = checkRACPassInterfaceFunction(
+					M.getOrInsertFunction("memmove", Attr, IntPtrTy, IntPtrTy,
+					IntPtrTy, IntPtrTy).getCallee());
+	MemcpyFn = checkRACPassInterfaceFunction(
+					M.getOrInsertFunction("memcpy", Attr, IntPtrTy, IntPtrTy,
+					IntPtrTy, IntPtrTy).getCallee());
+	MemsetFn = checkRACPassInterfaceFunction(
+					M.getOrInsertFunction("memset", Attr, IntPtrTy, IntPtrTy,
+					Int32Ty, IntPtrTy).getCallee());
 }
 
 bool RACPass::doInitialization(Module &M) {
@@ -622,10 +622,9 @@ bool RACPass::runOnFunction(Function &F) {
 	}
 #endif
 	
-    //TODO
-	//for (auto Inst : MemIntrinCalls) {
-	//	instrumentMemIntrinsic(Inst);
-	//}
+	for (auto Inst : MemIntrinCalls) {
+		instrumentMemIntrinsic(Inst);
+	}
 	
 	return false;
 }
@@ -693,19 +692,17 @@ bool RACPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
 		errs() << "Instrumenting non-atomic store: " << *I << "\n";
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy),
                                 IRB.CreateBitOrPointerCast(val, Ty), position};
-                CallInst *C = CallInst::Create(OnAccessFunc, args);
-                ReplaceInstWithInst(I, C);
+        CallInst *C = CallInst::Create(OnAccessFunc, args);
+        ReplaceInstWithInst(I, C);
 
 		NumInstrumentedWrites++;
 	} else {
 		errs() << "Instrumenting non-atomic load: " << *I << "\n";
 		Value *args[] = {IRB.CreatePointerCast(addr, ptrTy), position};
-        errs() << "arg1 type " << *ptrTy << " arg2 type " << *position->getType() << "\n";
-        errs() << "func type " << *OnAccessFunc->getFunctionType() << "\n";
-                Type *orgTy = val->getType();
-                Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
-                Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
-                I->replaceAllUsesWith(cast);
+        Type *orgTy = val->getType();
+        Value *funcInst = IRB.CreateCall(OnAccessFunc, args);
+        Value *cast = IRB.CreateBitOrPointerCast(funcInst, orgTy);
+        I->replaceAllUsesWith(cast);
 		
 		NumInstrumentedReads++;
 	}

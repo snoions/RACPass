@@ -24,6 +24,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -176,6 +177,7 @@ namespace {
 		static char ID;
 
 	private:
+        bool shouldIgnoreFunction(Function &F);
 		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
 		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
 		void initializeCallbacks(Module &M);
@@ -545,7 +547,39 @@ void CDSPass::InsertRuntimeIgnores(Function &F) {
 	}
 }*/
 
+bool RACPass::shouldIgnoreFunction(Function &F) {
+    std::vector<std::string> Result;
+    if (F.isDeclaration()) return true;
+
+    std::string Mangled = F.getName().str();
+
+    // Skip if not Itanium ABI mangling (e.g., C functions, intrinsics)
+    if (Mangled.empty() || Mangled[0] != '_')
+        return false;
+
+        // Parse with ItaniumDemangler
+    ItaniumPartialDemangler PD;
+    if (PD.partialDemangle(Mangled.c_str()))
+        return false; // not a valid Itanium symbol
+
+    bool ret = false;
+    auto Namespace = PD.getFunctionDeclContextName(nullptr, nullptr);
+    if (Namespace) {
+        //not dealing with machine local atomics for now
+        if (strstr(Namespace, "RACoherence") == Namespace || strstr(Namespace, "std::__atomic_base") == Namespace || strstr(Namespace, "std::atomic") == Namespace) {
+            auto Fullname = PD.getFunctionName(nullptr, nullptr);
+            errs() << "ignore function " << Fullname << "\n";
+            ret = true;
+            std::free(Fullname);
+        }
+        std::free(Namespace);
+    } 
+    return ret;
+}
+
 bool RACPass::runOnFunction(Function &F) {
+    if (shouldIgnoreFunction(F))
+        return false;
 	initializeCallbacks( *F.getParent() );
 	SmallVector<Instruction*, 8> AllLoadsAndStores;
 	SmallVector<Instruction*, 8> FenceOperations;

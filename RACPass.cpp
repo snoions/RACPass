@@ -312,18 +312,18 @@ void RACPass::initializeCallbacks(Module &M) {
 
     RACThreadOps = M.getGlobalVariable("_ZN11RACoherence10thread_opsE");
     if (!RACThreadOps || !RACThreadOps->isThreadLocal()) {
-	    std::string Err("RACPass thread_ops not defined or not thread local\n");
-	    report_fatal_error(StringRef(Err));
-    }
+        RACThreadOps = nullptr;
+	    errs() << "RACPass thread_ops not defined or not thread local\n";
+    } else {
+        RACThreadOpsIntrin = Intrinsic::getDeclarationIfExists(&M, Intrinsic::threadlocal_address, { RACThreadOps->getType()});
+        if (!RACThreadOpsIntrin) {
+	        std::string Err("RACPass no threadlocal_address intrinsic exist for thread_ops\n");
+	        report_fatal_error(StringRef(Err));
+        }
 
-    RACThreadOpsIntrin = Intrinsic::getDeclarationIfExists(&M, Intrinsic::threadlocal_address, { RACThreadOps->getType()});
-    if (!RACThreadOpsIntrin) {
-	    std::string Err("RACPass no threadlocal_address intrinsic exist for thread_ops\n");
-	    report_fatal_error(StringRef(Err));
+	    RACThreadOpsWrapper = checkRACPassInterfaceFunction(
+	    						M.getOrInsertFunction("_ZTWN11RACoherence10thread_opsE", Attr, RACThreadOps->getType()).getCallee());
     }
-
-	RACThreadOpsWrapper = checkRACPassInterfaceFunction(
-							M.getOrInsertFunction("_ZTWN11RACoherence10thread_opsE", Attr, RACThreadOps->getType()).getCallee());
 
 
 	// Get the function to call from our runtime library.
@@ -352,7 +352,8 @@ void RACPass::initializeCallbacks(Module &M) {
 		RACStore[i] = checkRACPassInterfaceFunction(
 							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty, Ptr8Ty).getCallee());
 
-        removeThreadOpsInitCheck(*RACStore[i]);
+        if (RACThreadOps)
+            removeThreadOpsInitCheck(*RACStore[i]);
 #ifdef ENABLEATOMIC		
 		RACVolatileLoad[i]  = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileLoadName,

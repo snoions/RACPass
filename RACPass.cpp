@@ -26,6 +26,7 @@
 #include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -177,9 +178,12 @@ namespace {
 		static char ID;
 
 	private:
+        bool isInTargetDeclContext(Function &F);
         bool shouldIgnoreFunction(Function &F);
 		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
 		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
+        std::string getDemangledName(StringRef Name);
+        bool removeThreadOpsInitCheck(Function &F);
 		void initializeCallbacks(Module &M);
 		bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
 		bool instrumentMemIntrinsic(Instruction *I);
@@ -200,7 +204,9 @@ namespace {
 
 		//Function * RACFuncEntry;
 		//Function * RACFuncExit;
-
+        GlobalVariable * RACThreadOps;
+        Function * RACThreadOpsIntrin;
+        Function * RACThreadOpsWrapper;
 		Function * RACLoad[kNumberOfAccessSizes];
 		Function * RACStore[kNumberOfAccessSizes];
 		Function * RACVolatileLoad[kNumberOfAccessSizes];
@@ -248,6 +254,48 @@ NVMOP RACPass::whichNVMoperation(Instruction *I){
 	return NVM_UNKNOWN;
 }
 
+std::string RACPass::getDemangledName(StringRef Name) {
+    std::string Mangled = Name.str();
+
+    // Skip if not Itanium ABI mangling (e.g., C functions, intrinsics)
+    if (Mangled.empty() || Mangled[0] != '_')
+        return Mangled;
+
+    // Parse with ItaniumDemangler
+    ItaniumPartialDemangler PD;
+    if (PD.partialDemangle(Mangled.c_str()))
+        return Mangled;
+    auto Demangled = PD.getFunctionName(nullptr, nullptr);
+    if (!Demangled)
+        return Mangled;
+    errs() << "demangled " << Demangled << "\n";
+    auto ret = std::string(Demangled);
+    free(Demangled);
+    return ret;
+}
+
+// remove the first block containing thread ops initialziation check
+bool RACPass::removeThreadOpsInitCheck(Function &F) {
+    for (BasicBlock &BB: F) {
+        for (auto IItr = BB.begin(); IItr != BB.end();) {
+            Instruction *I = &*IItr;
+            IItr++;
+            if (CallInst *CI = dyn_cast<CallInst>(I)) {
+                Value *Callee = CI->getCalledOperand();
+                if (Callee != RACThreadOpsWrapper)
+                    continue;
+                errs() << "replace thread_ops thread wrapper routine " << *CI << "?\n";
+                IRBuilder<> builder(CI);
+                Value *Args[] = { RACThreadOps };
+                auto NewCI = builder.CreateCall(RACThreadOpsIntrin, Args);
+                CI->replaceAllUsesWith(NewCI);
+                CI->eraseFromParent();
+            }
+        }
+    }
+    return false;
+}
+
 void RACPass::initializeCallbacks(Module &M) {
 	LLVMContext &Ctx = M.getContext();
 	AttributeList Attr;
@@ -262,7 +310,23 @@ void RACPass::initializeCallbacks(Module &M) {
     //only deal with default address space
 	Type *Ptr8Ty = PointerType::get(Type::getIntNTy(Ctx, 8), 0);
 
-	// Get the function to call from our untime library.
+    RACThreadOps = M.getGlobalVariable("_ZN11RACoherence10thread_opsE");
+    if (!RACThreadOps || !RACThreadOps->isThreadLocal()) {
+	    std::string Err("RACPass thread_ops not defined or not thread local\n");
+	    report_fatal_error(StringRef(Err));
+    }
+
+    RACThreadOpsIntrin = Intrinsic::getDeclarationIfExists(&M, Intrinsic::threadlocal_address, { RACThreadOps->getType()});
+    if (!RACThreadOpsIntrin) {
+	    std::string Err("RACPass no threadlocal_address intrinsic exist for thread_ops\n");
+	    report_fatal_error(StringRef(Err));
+    }
+
+	RACThreadOpsWrapper = checkRACPassInterfaceFunction(
+							M.getOrInsertFunction("_ZTWN11RACoherence10thread_opsE", Attr, RACThreadOps->getType()).getCallee());
+
+
+	// Get the function to call from our runtime library.
 	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
 		const unsigned ByteSize = 1U << i;
 		const unsigned BitSize = ByteSize * 8;
@@ -287,7 +351,8 @@ void RACPass::initializeCallbacks(Module &M) {
 							M.getOrInsertFunction(LoadName, Attr, Ty, PtrTy, Ptr8Ty).getCallee());
 		RACStore[i] = checkRACPassInterfaceFunction(
 							M.getOrInsertFunction(StoreName, Attr, VoidTy, PtrTy, Ty, Ptr8Ty).getCallee());
-		
+
+        removeThreadOpsInitCheck(*RACStore[i]);
 #ifdef ENABLEATOMIC		
 		RACVolatileLoad[i]  = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileLoadName,
@@ -547,17 +612,14 @@ void CDSPass::InsertRuntimeIgnores(Function &F) {
 	}
 }*/
 
-bool RACPass::shouldIgnoreFunction(Function &F) {
-    std::vector<std::string> Result;
-    if (F.isDeclaration()) return true;
-
+bool RACPass::isInTargetDeclContext(Function &F) {
     std::string Mangled = F.getName().str();
 
     // Skip if not Itanium ABI mangling (e.g., C functions, intrinsics)
     if (Mangled.empty() || Mangled[0] != '_')
         return false;
 
-        // Parse with ItaniumDemangler
+    // Parse with ItaniumDemangler
     ItaniumPartialDemangler PD;
     if (PD.partialDemangle(Mangled.c_str()))
         return false; // not a valid Itanium symbol
@@ -567,20 +629,33 @@ bool RACPass::shouldIgnoreFunction(Function &F) {
     if (Namespace) {
         //not dealing with machine local atomics for now
         if (strstr(Namespace, "RACoherence") == Namespace || strstr(Namespace, "std::__atomic_base") == Namespace || strstr(Namespace, "std::atomic") == Namespace) {
-            auto Fullname = PD.getFunctionName(nullptr, nullptr);
-            errs() << "ignore function " << Fullname << "\n";
             ret = true;
-            std::free(Fullname);
         }
         std::free(Namespace);
-    } 
+    }
     return ret;
 }
 
+bool RACPass::shouldIgnoreFunction(Function &F) {
+    if (F.isDeclaration()) return true;
+
+    if (isInTargetDeclContext(F)) {
+        errs() << "ignore function " << F.getName() << "\n";
+        return true;
+    }
+
+    if (std::find(std::begin(RACLoad), std::end(RACLoad), &F) != std::end(RACLoad) || std::find(std::begin(RACStore), std::end(RACStore), &F) != std::end(RACStore)) {
+        errs() << "ignore function " << F.getName() << "\n";
+        return true;
+    }
+
+    return false;
+}
+
 bool RACPass::runOnFunction(Function &F) {
+	initializeCallbacks( *F.getParent() );
     if (shouldIgnoreFunction(F))
         return false;
-	initializeCallbacks( *F.getParent() );
 	SmallVector<Instruction*, 8> AllLoadsAndStores;
 	SmallVector<Instruction*, 8> FenceOperations;
 	SmallVector<Instruction*, 8> CacheOperations;

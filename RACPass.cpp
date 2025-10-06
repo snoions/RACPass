@@ -804,6 +804,13 @@ bool RACPass::instrumentLoadOrStore(Instruction *I, const DataLayout &DL) {
                                 IRB.CreateBitOrPointerCast(val, Ty), position};
         CallInst *C = CallInst::Create(OnAccessFunc, args);
         ReplaceInstWithInst(I, C);
+        // make sure the inst has debug loc to avoid verifier errors
+        if (!C->getDebugLoc() && C->getFunction()->getSubprogram()) {
+            Function *F = C->getFunction();
+            LLVMContext &Ctx = F->getContext();
+            DISubprogram *SP = F->getSubprogram();
+            C->setDebugLoc(DebugLoc(DILocation::get(Ctx, 0, 0, SP)));
+        }
 
 		NumInstrumentedWrites++;
 	} else {

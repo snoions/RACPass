@@ -180,6 +180,8 @@ namespace {
 	private:
         bool isInTargetDeclContext(Function &F);
         bool shouldIgnoreFunction(Function &F);
+        bool tryProcessIgnoreBlock(Instruction &I);
+        bool shouldIgnoreInstruction(Instruction &I);
 		void instrumentFenceOp(Instruction *I, const DataLayout &DL);
 		bool instrumentCacheOp(Instruction *I, const DataLayout &DL);
         std::string getDemangledName(StringRef Name);
@@ -227,6 +229,9 @@ namespace {
 		std::vector<StringRef> PartialAtomicFuncNames;
 		std::vector<StringRef> CacheOperationsNames;
 		std::vector<StringRef> FenceOperationsNames;
+        const std::string IgnoreMarker = "rac_ignore";
+        const std::string IgnoreBeginMarker = "rac_ignore_begin";
+        const std::string IgnoreEndMarker = "rac_ignore_end";
 	};
 
 }
@@ -637,6 +642,68 @@ bool RACPass::isInTargetDeclContext(Function &F) {
     return ret;
 }
 
+bool RACPass::tryProcessIgnoreBlock(Instruction &I) {
+    if (!isa<CallBase>(I))
+        return false;
+	CallBase *CB = cast<CallBase>(&I);
+	Value *Callee = CB->getCalledOperand();
+    if (!isa<InlineAsm>(Callee))
+        return false;
+    InlineAsm *IA = cast<InlineAsm>(Callee);
+    StringRef AsmStr = IA->getAsmString();
+	if (AsmStr != "#ANNOTATE " + IgnoreBeginMarker)
+        return false;
+
+	bool Start = false;
+	std::list<BasicBlock *> Worklist;
+	SmallSetVector<BasicBlock *, 8> Seen;
+	Worklist.push_back(I.getParent());
+
+	LLVMContext &Ctx = Callee->getContext();
+	MDNode *N = MDNode::get(Ctx, {});
+
+	while (!Worklist.empty()) {
+		BasicBlock *Curr = Worklist.front();
+		Worklist.pop_front();
+		bool Stop = false;
+
+		for (BasicBlock::iterator It = Curr->begin(); It != Curr->end();) {
+			auto CurrI = &*It;
+			It++;
+			if (Start) {
+				CurrI->setMetadata(IgnoreMarker, N);
+			}
+
+			if (CurrI == &I) {
+				// Start annotating
+			    Start = true;
+				CurrI->eraseFromParent();
+			} else if (CallBase *CB = dyn_cast<CallBase>(CurrI)) {
+				if (InlineAsm *IA = dyn_cast<InlineAsm>(CB->getCalledOperand())) {
+					if (IA->getAsmString() == "#ANNOTATE " + IgnoreEndMarker) {
+                        // Stop annotating in the current and successor blocks
+					    Stop = true;
+						CurrI->eraseFromParent();
+						break;
+					}
+				}
+			}
+		}
+
+		if (!Stop) {
+			for (BasicBlock *Succ : successors(Curr)) {
+				if (Seen.insert(Succ))
+					Worklist.push_back(Succ);
+			}
+		}
+	}
+    return true;
+}
+
+bool RACPass::shouldIgnoreInstruction(Instruction &I) {
+    return I.getMetadata(IgnoreMarker) != NULL;
+}
+
 bool RACPass::shouldIgnoreFunction(Function &F) {
     if (F.isDeclaration()) return true;
 
@@ -645,7 +712,8 @@ bool RACPass::shouldIgnoreFunction(Function &F) {
         return true;
     }
 
-    if (std::find(std::begin(RACLoad), std::end(RACLoad), &F) != std::end(RACLoad) || std::find(std::begin(RACStore), std::end(RACStore), &F) != std::end(RACStore)) {
+    if (std::find(std::begin(RACLoad), std::end(RACLoad), &F) != std::end(RACLoad) || 
+        std::find(std::begin(RACStore), std::end(RACStore), &F) != std::end(RACStore)) {
         errs() << "ignore function " << F.getName() << "\n";
         return true;
     }
@@ -670,7 +738,13 @@ bool RACPass::runOnFunction(Function &F) {
 	const DataLayout &DL = F.getParent()->getDataLayout();
 
 	for (auto &BB : F) {
-		for (auto &Inst : BB) {
+		for (auto IItr = BB.begin(); IItr != BB.end(); ) {
+            Instruction &Inst = *IItr;
+            IItr++;
+            if (tryProcessIgnoreBlock(Inst))
+                continue;
+            if (shouldIgnoreInstruction(Inst))
+                continue;
 #ifdef ENABLEATOMIC
 			if ( (&Inst)->isAtomic() ) {
 				AtomicAccesses.push_back(&Inst);

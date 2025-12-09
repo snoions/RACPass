@@ -94,6 +94,7 @@ STATISTIC(NumOmittedNonCaptured, "Number of accesses ignored due to capturing");
 // static const char *const kCDSInitName = "cds_init";
 
 Type * OrdTy;
+Type * Ptr8Ty;
 Type * IntPtrTy;
 
 Type * VoidTy;
@@ -313,7 +314,7 @@ void RACPass::initializeCallbacks(Module &M) {
 
 	VoidTy = Type::getVoidTy(Ctx);
     //only deal with default address space
-	Type *Ptr8Ty = PointerType::get(Type::getIntNTy(Ctx, 8), 0);
+	Ptr8Ty = PointerType::get(Type::getInt8Ty(Ctx), 0);
 
     RACThreadOps = M.getGlobalVariable("_ZN11RACoherence10thread_opsE");
     if (!RACThreadOps || !RACThreadOps->isThreadLocal()) {
@@ -362,20 +363,20 @@ void RACPass::initializeCallbacks(Module &M) {
 #ifdef ENABLEATOMIC		
 		RACVolatileLoad[i]  = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileLoadName,
-								Attr, Ty, PtrTy, IntPtrTy).getCallee());
+								Attr, Ty, PtrTy, Ptr8Ty).getCallee());
 		RACVolatileStore[i] = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileStoreName, 
-								Attr, VoidTy, PtrTy, Ty, IntPtrTy).getCallee());
+								Attr, VoidTy, PtrTy, Ty, Ptr8Ty).getCallee());
 		
 		RACAtomicInit[i] = checkRACPassInterfaceFunction(
 							M.getOrInsertFunction(AtomicInitName, 
-							Attr, VoidTy, PtrTy, Ty, IntPtrTy).getCallee());
+							Attr, VoidTy, PtrTy, Ty, Ptr8Ty).getCallee());
 		RACAtomicLoad[i]  = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicLoadName, 
-								Attr, Ty, PtrTy, OrdTy, IntPtrTy).getCallee());
+								Attr, Ty, PtrTy, OrdTy, Ptr8Ty).getCallee());
 		RACAtomicStore[i] = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicStoreName, 
-								Attr, VoidTy, PtrTy, Ty, OrdTy, IntPtrTy).getCallee());
+								Attr, VoidTy, PtrTy, Ty, OrdTy, Ptr8Ty).getCallee());
 
 		for (unsigned op = AtomicRMWInst::FIRST_BINOP; 
 			op <= AtomicRMWInst::LAST_BINOP; ++op) {
@@ -400,7 +401,7 @@ void RACPass::initializeCallbacks(Module &M) {
 			SmallString<32> AtomicRMWName("rac_atomic" + NamePart + BitSizeStr);
 			RACAtomicRMW[op][i] = checkRACPassInterfaceFunction(
 									M.getOrInsertFunction(AtomicRMWName, 
-									Attr, Ty, PtrTy, Ty, OrdTy, IntPtrTy).getCallee());
+									Attr, Ty, PtrTy, Ty, OrdTy, Ptr8Ty).getCallee());
 		}
 
 		// only supportes strong version
@@ -408,25 +409,25 @@ void RACPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicCASName_V2("rac_atomic_compare_exchange" + BitSizeStr + "_v2");
 		RACAtomicCAS_V1[i] = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicCASName_V1, 
-								Attr, Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, IntPtrTy).getCallee());
+								Attr, Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, Ptr8Ty).getCallee());
 		RACAtomicCAS_V2[i] = checkRACPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicCASName_V2, 
-								Attr, Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, IntPtrTy).getCallee());
+								Attr, Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, Ptr8Ty).getCallee());
 #endif
 	}
 #ifdef ENABLEATOMIC
 	RACAtomicThreadFence = checkRACPassInterfaceFunction(
-			M.getOrInsertFunction("rac_atomic_thread_fence", Attr, VoidTy, OrdTy, IntPtrTy).getCallee());
+			M.getOrInsertFunction("rac_atomic_thread_fence", Attr, VoidTy, OrdTy, Ptr8Ty).getCallee());
 #endif
 	
 	MemmoveFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memmove", Attr, IntPtrTy, IntPtrTy,
-					IntPtrTy, IntPtrTy).getCallee());
+					M.getOrInsertFunction("memmove", Attr, Ptr8Ty, Ptr8Ty,
+					Ptr8Ty, IntPtrTy).getCallee());
 	MemcpyFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memcpy", Attr, IntPtrTy, IntPtrTy,
-					IntPtrTy, IntPtrTy).getCallee());
+					M.getOrInsertFunction("memcpy", Attr, Ptr8Ty, Ptr8Ty,
+					Ptr8Ty, IntPtrTy).getCallee());
 	MemsetFn = checkRACPassInterfaceFunction(
-					M.getOrInsertFunction("memset", Attr, IntPtrTy, IntPtrTy,
+					M.getOrInsertFunction("memset", Attr, Ptr8Ty, Ptr8Ty,
 					Int32Ty, IntPtrTy).getCallee());
 }
 
@@ -953,15 +954,15 @@ bool RACPass::instrumentMemIntrinsic(Instruction *I) {
 	if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
 		IRB.CreateCall(
 			MemsetFn,
-			{IRB.CreatePointerCast(M->getArgOperand(0), IntPtrTy),
+			{IRB.CreatePointerCast(M->getArgOperand(0), Ptr8Ty),
 			 IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false),
 			 IRB.CreateIntCast(M->getArgOperand(2), IntPtrTy, false)});
 		I->eraseFromParent();
 	} else if (MemTransferInst *M = dyn_cast<MemTransferInst>(I)) {
 		IRB.CreateCall(
 			isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
-			{IRB.CreatePointerCast(M->getArgOperand(0), IntPtrTy),
-			 IRB.CreatePointerCast(M->getArgOperand(1), IntPtrTy),
+			{IRB.CreatePointerCast(M->getArgOperand(0), Ptr8Ty),
+			 IRB.CreatePointerCast(M->getArgOperand(1), Ptr8Ty),
 			 IRB.CreateIntCast(M->getArgOperand(2), IntPtrTy, false)});
 		I->eraseFromParent();
 	}
